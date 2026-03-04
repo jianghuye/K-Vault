@@ -350,6 +350,10 @@
             throw new Error(extractErrorMessage(payload, fallback));
           }
 
+          if (payload && payload.success === false) {
+            throw new Error(extractErrorMessage(payload, "Request failed"));
+          }
+
           return payload;
         })
         .catch(function (error) {
@@ -386,6 +390,9 @@
         };
       })
       .catch(function (error) {
+        try {
+          console.warn("[ui-config] GET /api/ui-config failed:", error);
+        } catch (e) {}
         if (applyLocalOnFailure) {
           var local = readSettings();
           applySettings(local, { persist: false, silent: silent });
@@ -425,6 +432,9 @@
         };
       })
       .catch(function (error) {
+        try {
+          console.error("[ui-config] POST /api/ui-config failed:", error);
+        } catch (e) {}
         if (opts.throwOnError) {
           throw error;
         }

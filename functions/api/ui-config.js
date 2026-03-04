@@ -2,6 +2,7 @@ import { checkAuthentication, isAuthRequired } from '../utils/auth.js';
 import { apiError, apiSuccess } from '../utils/api-v1.js';
 
 const UI_CONFIG_KEY = 'ui_config';
+const KV_BINDING_CANDIDATES = ['img_url', 'KV', 'UI_CONFIG_KV'];
 const EFFECT_STYLES = new Set(['none', 'math', 'particle', 'texture']);
 
 const DEFAULT_UI_CONFIG = {
@@ -77,46 +78,72 @@ function extractUiConfigPayload(body = {}) {
   return {};
 }
 
+function resolveKvBinding(env = {}) {
+  for (const name of KV_BINDING_CANDIDATES) {
+    const candidate = env?.[name];
+    if (candidate && typeof candidate.get === 'function' && typeof candidate.put === 'function') {
+      return { name, binding: candidate };
+    }
+  }
+  return null;
+}
+
+function missingKvBindingResponse() {
+  return apiError(
+    'KV_BINDING_MISSING',
+    '未检测到可用的 KV 命名空间绑定，请在 Cloudflare Pages -> Settings -> Functions -> KV namespace bindings 中绑定并重新部署。',
+    500,
+    { expectedBindings: KV_BINDING_CANDIDATES }
+  );
+}
+
 export async function onRequestOptions() {
   return new Response(null, { status: 204 });
 }
 
 export async function onRequestGet(context) {
-  if (!context.env?.img_url) {
-    return apiError(
-      'SERVER_MISCONFIGURED',
-      'KV binding img_url is not configured.',
-      500
-    );
+  const kv = resolveKvBinding(context.env);
+  if (!kv) {
+    console.error('[ui-config] KV binding missing. Expected one of:', KV_BINDING_CANDIDATES.join(', '));
+    return missingKvBindingResponse();
   }
 
   let saved = null;
   try {
-    saved = await context.env.img_url.get(UI_CONFIG_KEY, { type: 'json' });
-  } catch {
-    saved = null;
+    saved = await kv.binding.get(UI_CONFIG_KEY, { type: 'json' });
+  } catch (error) {
+    console.error('[ui-config] Failed to read config from KV:', {
+      binding: kv.name,
+      error: error?.message || String(error),
+    });
+    return apiError(
+      'KV_READ_FAILED',
+      '读取 UI 配置失败，请检查 KV 绑定与 Functions 日志。',
+      500,
+      { binding: kv.name, detail: error?.message || String(error) }
+    );
   }
 
   const config = normalizeUiConfig(saved || DEFAULT_UI_CONFIG);
   return apiSuccess({
     config,
     source: saved ? 'kv' : 'default',
+    binding: kv.name,
   });
 }
 
 export async function onRequestPost(context) {
-  if (!context.env?.img_url) {
-    return apiError(
-      'SERVER_MISCONFIGURED',
-      'KV binding img_url is not configured.',
-      500
-    );
+  const kv = resolveKvBinding(context.env);
+  if (!kv) {
+    console.error('[ui-config] KV binding missing. Expected one of:', KV_BINDING_CANDIDATES.join(', '));
+    return missingKvBindingResponse();
   }
 
   if (isAuthRequired(context.env)) {
     const auth = await checkAuthentication(context);
     if (!auth.authenticated) {
-      return apiError('UNAUTHORIZED', 'You need to login.', 401);
+      console.warn('[ui-config] Unauthorized write attempt blocked.');
+      return apiError('UNAUTHORIZED', '需要先登录管理员账号。', 401);
     }
   }
 
@@ -128,10 +155,24 @@ export async function onRequestPost(context) {
   }
 
   const config = normalizeUiConfig(extractUiConfigPayload(body));
-  await context.env.img_url.put(UI_CONFIG_KEY, JSON.stringify(config));
+  try {
+    await kv.binding.put(UI_CONFIG_KEY, JSON.stringify(config));
+  } catch (error) {
+    console.error('[ui-config] Failed to write config to KV:', {
+      binding: kv.name,
+      error: error?.message || String(error),
+    });
+    return apiError(
+      'KV_WRITE_FAILED',
+      '保存 UI 配置失败，请检查 KV 绑定权限与 Functions 日志。',
+      500,
+      { binding: kv.name, detail: error?.message || String(error) }
+    );
+  }
 
   return apiSuccess({
     config,
     source: 'kv',
+    binding: kv.name,
   });
 }
